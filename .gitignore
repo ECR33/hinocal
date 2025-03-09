@@ -1,0 +1,10 @@
+.venv/
+in*/
+results*/
+!in/
+!results/
+credentials*.json
+token*.json
+*.xlsx*
+!sample.xlsx
+*.pdf
