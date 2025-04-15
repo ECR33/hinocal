@@ -3,6 +3,7 @@ import os.path
 import argparse
 from icecream import ic
 import openpyxl
+from openpyxl.styles import Alignment
 import uuid
 
 from google.auth.transport.requests import Request
@@ -31,7 +32,9 @@ def sign_in():
             try:
                 creds.refresh(Request())
             except Exception as e:
-                print("ERROR: おそらくtokenの有効期限が切れています。-reオプションを指定して再度実行してください。")
+                print(
+                    "ERROR: おそらくtokenの有効期限が切れています。-reオプションを指定して再度実行してください。"
+                )
                 ic(str(e))
                 exit(1)
         else:
@@ -130,6 +133,125 @@ def get_events(service, start_date):
         print(f"An error occurred: {error}")
 
 
+def download_events(service, school_year, out_file):
+    """カレンダーから指定した年度のイベントを取得し、Excelファイルを作成する。"""
+
+    def write_row(ws, row_num, event):
+        """イベントを指定した行に書き出す"""
+        id = event["id"]
+        st = event["start"].get("dateTime", event["start"].get("date"))
+        ed = event["end"].get("dateTime", event["end"].get("date"))
+        st = datetime.datetime.fromisoformat(st).replace(tzinfo=None)
+        ed = datetime.datetime.fromisoformat(ed).replace(tzinfo=None)
+        delta_one = (ed - st) == datetime.timedelta(days=1)
+        summary = event["summary"]
+        description = event.get("description", "")
+        ws.cell(row_num, 1, st)
+        if st.strftime("%H:%M:%S") == "00:00:00":
+            # date
+            ws.cell(row_num, 1).number_format = "yyyy/mm/dd"
+        else:
+            # datetime
+            ws.cell(row_num, 1).number_format = "yyyy/mm/dd hh:mm"
+        if delta_one:
+            # 1日のイベントの場合、終了日は省略
+            pass
+        else:
+            if ed.strftime("%H:%M:%S") == "00:00:00":
+                # 日付のみの終了日を記録する場合、その日を含む、という表現とする
+                ed = ed - datetime.timedelta(days=1)
+            ws.cell(row_num, 2, ed)
+        if ed.strftime("%H:%M:%S") == "00:00:00":
+            # date
+            ws.cell(row_num, 2).number_format = "yyyy/mm/dd"
+        else:
+            # datetime
+            ws.cell(row_num, 2).number_format = "yyyy/mm/dd hh:mm"
+
+        ws.cell(row_num, 3, summary)
+        ws.cell(row_num, 4, description)
+        ws.cell(row_num, 5, id)
+
+        topleft = Alignment(horizontal="left", vertical="top", wrap_text=False)
+        topleft_wrap = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        ws.cell(row_num, 1).alignment = topleft
+        ws.cell(row_num, 2).alignment = topleft
+        ws.cell(row_num, 3).alignment = topleft
+        if description.find("\n") >= 0:
+            # 折返し
+            ws.cell(row_num, 4).alignment = topleft_wrap
+        else:
+            ws.cell(row_num, 4).alignment = topleft
+        ws.cell(row_num, 5).alignment = topleft
+        ic(st.isoformat(), summary)
+
+    try:
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        counter = 0
+
+        if school_year:
+            school_year = int(school_year)
+        else:
+            now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+            school_year = now.year
+
+        if out_file:
+            pass
+        else:
+            out_file = f"calendar_sy{school_year}.xlsx"
+
+
+        st = datetime.datetime(
+            year=school_year,
+            month=4,
+            day=1,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=9)),
+        )
+        ed = datetime.datetime(
+            year=school_year + 1,
+            month=3,
+            day=31,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=9)),
+        )
+        page_token = None
+        while True:
+            events_result = (
+                service.events()
+                .list(
+                    calendarId=CAL_ID,
+                    timeMin=st.isoformat(),
+                    timeMax=ed.isoformat(),
+                    maxResults=1000,
+                    singleEvents=True,
+                    orderBy="startTime",
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+            events = events_result.get("items", [])
+            for event in events:
+                counter += 1
+                write_row(ws, counter, event)
+            page_token = events_result.get("nextPageToken")
+            if not page_token:
+                break
+
+        ws.column_dimensions["A"].width = 12
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 25
+        ws.column_dimensions["D"].width = 40
+        ws.column_dimensions["E"].width = 30
+
+        wb.save(out_file)
+
+        return True
+
+    except Exception as e:
+        ic(e)
+
+
 def list_calendar(service):
     """カレンダー一覧を取得する"""
     try:
@@ -222,10 +344,13 @@ def main(command=None, in_file=None, args=None):
         # Prints the start and name of the next 10 events
         for event in events:
             start = event["start"].get("dateTime", event["start"].get("date"))
-            print(start, event["id"], event["summary"])
+            print(start, event["id"], event["summary"], event["description"])
 
     if command == "calendar":
         list_calendar(service)
+
+    if command == "download":
+        download_events(service, args.school_year, args.out_file)
 
     if command == "sync":
         ic(in_file)
@@ -279,11 +404,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "command",
-        choices=[
-            "list",
-            "sync",
-            "calendar",
-        ],
+        choices=["list", "sync", "calendar", "download"],
         help="list: Get and print events from Google calender. sync: Sync local to Google. calendar: Get and print calenders from Google.",
     )
     parser.add_argument(
@@ -294,6 +415,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("-sd", "--startdate", help="開始年月 yyyy-mm")
     parser.add_argument("-f", "--file", help="行事予定一覧excelファイル")
+    parser.add_argument(
+        "-of",
+        "--out_file",
+        help="カレンダーの内容を書き出すexcelファイル名。指定しない場合は'calendar_syYYYY.xlsx'。既存のファイルは上書きされる。",
+    )
+    parser.add_argument("-sy", "--school_year", help="年度 yyyy")
     args = parser.parse_args()
     if args.relogin:
         if os.path.exists("./token.json"):
