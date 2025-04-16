@@ -1,10 +1,13 @@
 import datetime
+import zoneinfo
 import os.path
 import argparse
 from icecream import ic
 import openpyxl
 from openpyxl.styles import Alignment, Protection
+from openpyxl.comments import Comment
 import uuid
+import re
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -46,49 +49,86 @@ def sign_in():
     return creds
 
 
+def iso2jst(date_str):
+    """iso format 文字列から日本時間のdatetimeオブジェクトを作成する"""
+    dt = datetime.datetime.fromisoformat(date_str)
+    return dt.astimezone(zoneinfo.ZoneInfo("Asia/Tokyo"))
+
+
+def remove_time_stamp(description):
+    """descriptionに記載されている(このシステムで追加した)タイムスタンプを除去する"""
+    description = re.sub("/////.*時点 /////$", "", description)
+    return description.strip()
+
+
+def append_time_stamp(description):
+    """カレンダーの更新日を利用者にわかりやすくするために末尾にタイムスタンプを付与する"""
+    today = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+    description += f"\n\n///// {today} 時点 /////"
+    return description
+
+
 def update_event(service, event):
     """カレンダーにイベントを登録する"""
     result = None
     g_event = None
     try:
+        # Googleから取得
         g_event = (
             service.events().get(calendarId=CAL_ID, eventId=f"{event['id']}").execute()
         )
+
+        if g_event != None:
+            # 値準備
+            g_start = g_event["start"].get("dateTime", g_event["start"].get("date"))
+            g_end = g_event["end"].get("dateTime", g_event["end"].get("date"))
+            g_summary = g_event.get("summary")
+            g_description = remove_time_stamp(g_event.get("description"))
+
+            start = event["start"].get("dateTime", event["start"].get("date"))
+            end = event["end"].get("dateTime", event["end"].get("date"))
+            summary = event.get("summary")
+            description = event.get("description")
+
+            # 変更確認
+            if (
+                g_start == start
+                and g_end == end
+                and g_summary == summary
+                and g_description == description
+                and g_event["status"] == "confirmed"
+            ):
+                # 変更なし
+                pass
+            else:
+                # 変更あり。
+                if g_event["status"] != "confirmed":
+                    # 削除済みなので更新しない
+                    pass
+                else:
+                    # 更新する。
+                    g_event["start"] = event["start"]
+                    g_event["end"] = event["end"]
+                    g_event["summary"] = event["summary"]
+                    g_event["status"] = "confirmed"
+                    g_event["description"] = append_time_stamp(description)
+                    result = (
+                        service.events()
+                        .update(calendarId=CAL_ID, eventId=g_event["id"], body=g_event)
+                        .execute()
+                    )
+                    # debug
+                    # ic(g_event, event)
+                    if result:
+                        print("Event created/updated: %s" % (result.get("htmlLink")))
+                    else:
+                        print("Why result is None?")
+
     except HttpError as e:
-        # probably, not found. Let's insert new event.
+        # 取得できなかったので追加する
+        event["description"] = append_time_stamp(event.get("description"))
         result = service.events().insert(calendarId=CAL_ID, body=event).execute()
-    if (
-        g_event != None
-        and g_event["start"]["dateTime"] == event["start"]["dateTime"]
-        and g_event["end"]["dateTime"] == event["end"]["dateTime"]
-        and g_event["summary"] == event["summary"]
-        and g_event["status"] == "confirmed"
-        # and g_event["description"] == event["description"]
-    ):
-        # NOP
-        # print(f"Skipped. {g_event["summary"]}")
-        pass
-    else:
-        # Let's update!
-        if g_event:
-            g_event["start"]["dateTime"] = event["start"]["dateTime"]
-            g_event["end"]["dateTime"] = event["end"]["dateTime"]
-            g_event["summary"] = event["summary"]
-            g_event["status"] = "confirmed"
-            g_event["description"] = (
-                g_event["description"] + "\n" + event["description"]
-            )
-            result = (
-                service.events()
-                .update(calendarId=CAL_ID, eventId=g_event["id"], body=g_event)
-                .execute()
-            )
-        # debug
-        # ic(g_event, event)
-        if result:
-            print("Event created/updated: %s" % (result.get("htmlLink")))
-        else:
-            print("Why result is None?")
+
     return result
 
 
@@ -136,6 +176,39 @@ def get_events(service, start_date):
 def download_events(service, school_year, out_file):
     """カレンダーから指定した年度のイベントを取得し、Excelファイルを作成する。"""
 
+    def write_header(ws):
+        """シートにヘッダーを記入する"""
+        # cell value and comment
+        ws.cell(1, 1, "開始日")
+        ws.cell(1, 2, "終了日")
+        ws.cell(1, 2).comment = Comment(
+            text="オプション。記入されていない場合は開始日一日のイベント。指定した場合この日を含むイベントが作成される。",
+            author="Kenji Sakurai",
+        )
+        ws.cell(1, 3, "行事")
+        ws.cell(1, 4, "内容")
+        ws.cell(1, 5, "作成日")
+        ws.cell(1, 5).comment = Comment(
+            text="Google側の作成日。更新不可", author="Kenji Sakurai"
+        )
+        ws.cell(1, 6, "更新日")
+        ws.cell(1, 6).comment = Comment(
+            text="Google側の更新日。更新不可", author="Kenji Sakurai"
+        )
+        ws.cell(1, 7, "イベントID")
+        ws.cell(1, 7).comment = Comment(
+            text="Google側のID。編集不可。", author="Kenji Sakurai"
+        )
+
+        # cell protection
+        ws.cell(1, 1).protection = Protection(locked=False)
+        ws.cell(1, 2).protection = Protection(locked=False)
+        ws.cell(1, 3).protection = Protection(locked=False)
+        ws.cell(1, 4).protection = Protection(locked=False)
+        ws.cell(1, 5).protection = Protection(locked=False)
+        ws.cell(1, 6).protection = Protection(locked=False)
+        ws.cell(1, 7).protection = Protection(locked=False)
+
     def write_row(ws, row_num, event):
         """イベントを指定した行に書き出す"""
         id = event["id"]
@@ -146,6 +219,9 @@ def download_events(service, school_year, out_file):
         delta_one = (ed - st) == datetime.timedelta(days=1)
         summary = event["summary"]
         description = event.get("description", "")
+        description = remove_time_stamp(description)
+        created = iso2jst(event.get("created"))
+        updated = iso2jst(event.get("updated"))
 
         # cell value
         ws.cell(row_num, 1, st)
@@ -172,7 +248,11 @@ def download_events(service, school_year, out_file):
 
         ws.cell(row_num, 3, summary)
         ws.cell(row_num, 4, description)
-        ws.cell(row_num, 5, id)
+        ws.cell(row_num, 5, created.replace(tzinfo=None))
+        ws.cell(row_num, 5).number_format = "yyyy/mm/dd hh:mm"
+        ws.cell(row_num, 6, updated.replace(tzinfo=None))
+        ws.cell(row_num, 6).number_format = "yyyy/mm/dd hh:mm"
+        ws.cell(row_num, 7, id)
 
         # cell alignment
         topleft = Alignment(horizontal="left", vertical="top", wrap_text=False)
@@ -186,6 +266,8 @@ def download_events(service, school_year, out_file):
         else:
             ws.cell(row_num, 4).alignment = topleft
         ws.cell(row_num, 5).alignment = topleft
+        ws.cell(row_num, 6).alignment = topleft
+        ws.cell(row_num, 7).alignment = topleft
 
         # cell protection
         ws.cell(row_num, 1).protection = Protection(locked=False)
@@ -193,13 +275,15 @@ def download_events(service, school_year, out_file):
         ws.cell(row_num, 3).protection = Protection(locked=False)
         ws.cell(row_num, 4).protection = Protection(locked=False)
         ws.cell(row_num, 5).protection = Protection(locked=True)
+        ws.cell(row_num, 6).protection = Protection(locked=True)
+        ws.cell(row_num, 7).protection = Protection(locked=True)
         ic(st.isoformat(), summary)
 
     try:
 
         wb = openpyxl.Workbook()
         ws = wb.active
-        counter = 0
+        counter = 1
 
         if school_year:
             school_year = int(school_year)
@@ -239,8 +323,10 @@ def download_events(service, school_year, out_file):
                 )
                 .execute()
             )
+            write_header(ws)
             events = events_result.get("items", [])
             for event in events:
+                # ic(event)
                 counter += 1
                 write_row(ws, counter, event)
             page_token = events_result.get("nextPageToken")
@@ -251,19 +337,93 @@ def download_events(service, school_year, out_file):
         ws.column_dimensions["B"].width = 12
         ws.column_dimensions["C"].width = 25
         ws.column_dimensions["D"].width = 40
-        ws.column_dimensions["E"].width = 30
+        ws.column_dimensions["E"].width = 16
+        ws.column_dimensions["F"].width = 16
+        ws.column_dimensions["G"].width = 30
 
+        # 列選択で保護解除できないので力技
+        for i in range(1, 1000):
+            ws.cell(i, 1).protection = Protection(locked=False)
+            ws.cell(i, 2).protection = Protection(locked=False)
+            ws.cell(i, 3).protection = Protection(locked=False)
+            ws.cell(i, 4).protection = Protection(locked=False)
+
+        ws.freeze_panes = "B2"
         # ws.protection.password = "hinogaku"
         ws.protection.insertRows = False
         ws.protection.deleteRows = False
         ws.protection.sort = False
         ws.protection.enable()
         wb.save(out_file)
+        ic(out_file)
 
         return True
 
     except Exception as e:
         ic(e)
+
+
+def upload_events(service, school_year, in_file):
+    """エクセルの内容をカレンダーへ反映する"""
+
+    if school_year:
+        school_year = int(school_year)
+    else:
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+        school_year = now.year
+
+    if in_file:
+        pass
+    else:
+        in_file = f"calendar_sy{school_year}.xlsx"
+
+    ic(in_file)
+    wb = openpyxl.load_workbook(in_file)
+    ws = wb.active  # wb["Sheet1"]
+    max_row = ws.max_row
+    counter = 0
+    for row in ws:
+        counter += 1
+        # if counter > 10:  # debug
+        #     break
+        if row[0].value == "開始日":
+            # skip
+            print(f"{counter}/{max_row}: skip title row")
+            pass
+        else:
+            g_event = create_event_from_row(row)
+            if g_event:
+                event = update_event(service, g_event)
+                if event:
+                    print(
+                        f"{counter}/{max_row}: Updated. {event["start"].get("dateTime",event["start"].get("date"))} - {event["end"].get("dateTime",event["end"].get("date"))}: {event["summary"]} {event.get("description")}"
+                    )
+                    # write back to excel sheet
+                    ws.cell(counter, 7, g_event["id"])
+                    created = iso2jst(event.get("created"))
+                    updated = iso2jst(event.get("updated"))
+                    ws.cell(counter, 5, created.replace(tzinfo=None))
+                    ws.cell(counter, 5).number_format = "yyyy/mm/dd hh:mm"
+                    ws.cell(counter, 6, updated.replace(tzinfo=None))
+                    ws.cell(counter, 6).number_format = "yyyy/mm/dd hh:mm"
+
+                else:
+                    print(
+                        f"{counter}/{max_row}: Skipped. {g_event["start"].get("dateTime",g_event["start"].get("date"))} - {g_event["end"].get("dateTime",g_event["end"].get("date"))}: {g_event.get("summary")}"
+                    )
+            else:
+                # ignore None
+                pass
+    wb.save(in_file)
+
+    try:
+        pass
+
+        # event = update_event(service, event)
+        # print ('Event created: %s' % (event.get('htmlLink')))
+
+    except HttpError as error:
+        print(f"An error occurred: {error}")
 
 
 def list_calendar(service):
@@ -273,7 +433,8 @@ def list_calendar(service):
         while True:
             calendar_list = service.calendarList().list(pageToken=page_token).execute()
             for calendar_list_entry in calendar_list["items"]:
-                print(calendar_list_entry["summary"])
+                ic(calendar_list_entry)
+                # print(calendar_list_entry["summary"])
                 # print(calendar_list_entry)
             page_token = calendar_list.get("nextPageToken")
             if not page_token:
@@ -283,63 +444,77 @@ def list_calendar(service):
 
 
 def create_event_from_row(row):
+    """カレンダーイベントを作成する"""
     summary = row[2].value
     if summary == None or summary == "":
         return None
 
-    today = datetime.datetime.now(
-        datetime.timezone(datetime.timedelta(hours=+9))
-    ).isoformat()
-    event_id = row[3].value
+    description = row[3].value
+
+    if len(row) > 6:
+        event_id = row[6].value
+    else:
+        event_id = None
     if event_id == None or event_id == "" or event_id == 0:
         print("new record found.", row[2].value)
         event_id = uuid.uuid4().hex
-    # print("event_id", event_id)
-    start = row[0].value
-    if type(start) == datetime.date:
-        # ic("start date", start)
-        pass
-    elif type(start) == datetime.datetime:
-        # ic("start datetime", start)
-        pass
-    else:
-        ic("start other", type(start))
-        return None
-    end = row[1].value
-    if type(end) == datetime.date:
-        end = end + datetime.timedelta(days=1)
-        # ic("end date", end)
-        pass
-    elif type(end) == datetime.datetime:
-        end = end + datetime.timedelta(days=1)
-        # ic("end datetime", end)
-        pass
-    else:
-        # ic("end other", type(end))
-        end = start + datetime.timedelta(days=1)
-    start = start.replace(
-        tzinfo=datetime.timezone(datetime.timedelta(hours=+9))
-    ).isoformat()
-    end = end.replace(
-        tzinfo=datetime.timezone(datetime.timedelta(hours=+9))
-    ).isoformat()
 
     event = {
         "id": f"{event_id}",
         "summary": f"{summary}",
-        "description": f"==== {today} 時点",
-        "start": {
-            "dateTime": f"{start}",
-            "timeZone": "Asia/Tokyo",
-        },
-        "end": {
-            "dateTime": f"{end}",
-            "timeZone": "Asia/Tokyo",
-        },
+        "start": {},
+        "end": {},
+        "description": f"{description}",
         "reminders": {"useDefault": False},
     }
 
-    # ic(event)
+    start = row[0].value
+    end = row[1].value
+
+    # validation
+    if type(start) == datetime.date or type(start) == datetime.datetime:
+        # OK
+        pass
+    else:
+        # NG
+        return None
+    if type(end) == datetime.date or type(end) == datetime.datetime:
+        # OK
+        pass
+    else:
+        # 日付省略パターン(まずは"その日まで"として設定)
+        end = start
+
+    event_type = ""
+
+    # date or datetime 判定
+    if (
+        start.strftime("%H:%M:%S") == "00:00:00"
+        and end.strftime("%H:%M:%S") == "00:00:00"
+    ):
+        event_type = "date"
+    else:
+        event_type = "datetime"
+
+    if event_type == "date":
+        event["start"]["date"] = start.strftime("%Y-%m-%d")
+        end = end + datetime.timedelta(days=1)
+        event["end"]["date"] = end.strftime("%Y-%m-%d")
+    else:
+        # event_type == datetime
+        start_iso = start.replace(
+            tzinfo=datetime.timezone(datetime.timedelta(hours=+9))
+        ).isoformat()
+        event["start"]["dateTime"] = start_iso
+        event["start"]["timeZone"] = "Asia/Tokyo"
+        # ↓時間指定されている場合は日付を+1日する必要はない
+        # end = start + datetime.timedelta(days=1)
+        end_iso = end.replace(
+            tzinfo=datetime.timezone(datetime.timedelta(hours=+9))
+        ).isoformat()
+        event["end"]["dateTime"] = end_iso
+        event["end"]["timeZone"] = "Asia/Tokyo"
+
     return event
 
 
@@ -358,13 +533,24 @@ def main(command=None, in_file=None, args=None):
         # Prints the start and name of the next 10 events
         for event in events:
             start = event["start"].get("dateTime", event["start"].get("date"))
-            print(start, event["id"], event["summary"], event["description"])
+            # print(start, event["id"], event["summary"], event["description"])
+            ic(event)
+            # created_str = event.get("created")
+            # created = iso2jst(created_str)
+            # updated_str = event.get("updated")
+            # updated = iso2jst(updated_str)
+            # ic(event.get("summary"))
+            # ic(created_str, created.strftime("%Y-%m-%d %H:%M:%S"))
+            # ic(updated_str, updated.strftime("%Y-%m-%d %H:%M:%S"))
 
     if command == "calendar":
         list_calendar(service)
 
     if command == "download":
-        download_events(service, args.school_year, args.out_file)
+        download_events(service, args.school_year, args.calendar_file)
+
+    if command == "upload":
+        upload_events(service, args.school_year, args.calendar_file)
 
     if command == "sync":
         ic(in_file)
@@ -414,11 +600,11 @@ def main(command=None, in_file=None, args=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Googleカレンダーにイベント(予定)を登録・更新する"
+        description="Googleカレンダーにイベント(予定)を登録・更新する。Googleカレンダーの情報を正と捉え、更新するためにダウンロードし、編集後にアップロードしてカレンダーを更新する。"
     )
     parser.add_argument(
         "command",
-        choices=["list", "sync", "calendar", "download"],
+        choices=["list", "sync", "calendar", "download", "upload"],
         help="list: Get and print events from Google calender. sync: Sync local to Google. calendar: Get and print calenders from Google.",
     )
     parser.add_argument(
@@ -430,11 +616,11 @@ if __name__ == "__main__":
     parser.add_argument("-sd", "--startdate", help="開始年月 yyyy-mm")
     parser.add_argument("-f", "--file", help="行事予定一覧excelファイル")
     parser.add_argument(
-        "-of",
-        "--out_file",
-        help="カレンダーの内容を書き出すexcelファイル名。指定しない場合は'calendar_syYYYY.xlsx'。既存のファイルは上書きされる。",
+        "-cf",
+        "--calendar_file",
+        help="カレンダーの内容を書き出す/読み込むexcelファイル名。指定しない場合は'calendar_syYYYY.xlsx'。既存のファイルは上書きされる。",
     )
-    parser.add_argument("-sy", "--school_year", help="年度 yyyy")
+    parser.add_argument("-sy", "--school_year", help="年度 yyyy。downloadとuploadの際に使用する。")
     args = parser.parse_args()
     if args.relogin:
         if os.path.exists("./token.json"):
