@@ -3,7 +3,7 @@ import os.path
 import argparse
 from icecream import ic
 import openpyxl
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Protection
 import uuid
 
 from google.auth.transport.requests import Request
@@ -146,6 +146,8 @@ def download_events(service, school_year, out_file):
         delta_one = (ed - st) == datetime.timedelta(days=1)
         summary = event["summary"]
         description = event.get("description", "")
+
+        # cell value
         ws.cell(row_num, 1, st)
         if st.strftime("%H:%M:%S") == "00:00:00":
             # date
@@ -172,6 +174,7 @@ def download_events(service, school_year, out_file):
         ws.cell(row_num, 4, description)
         ws.cell(row_num, 5, id)
 
+        # cell alignment
         topleft = Alignment(horizontal="left", vertical="top", wrap_text=False)
         topleft_wrap = Alignment(horizontal="left", vertical="top", wrap_text=True)
         ws.cell(row_num, 1).alignment = topleft
@@ -183,6 +186,13 @@ def download_events(service, school_year, out_file):
         else:
             ws.cell(row_num, 4).alignment = topleft
         ws.cell(row_num, 5).alignment = topleft
+
+        # cell protection
+        ws.cell(row_num, 1).protection = Protection(locked=False)
+        ws.cell(row_num, 2).protection = Protection(locked=False)
+        ws.cell(row_num, 3).protection = Protection(locked=False)
+        ws.cell(row_num, 4).protection = Protection(locked=False)
+        ws.cell(row_num, 5).protection = Protection(locked=True)
         ic(st.isoformat(), summary)
 
     try:
@@ -201,7 +211,6 @@ def download_events(service, school_year, out_file):
             pass
         else:
             out_file = f"calendar_sy{school_year}.xlsx"
-
 
         st = datetime.datetime(
             year=school_year,
@@ -244,6 +253,11 @@ def download_events(service, school_year, out_file):
         ws.column_dimensions["D"].width = 40
         ws.column_dimensions["E"].width = 30
 
+        # ws.protection.password = "hinogaku"
+        ws.protection.insertRows = False
+        ws.protection.deleteRows = False
+        ws.protection.sort = False
+        ws.protection.enable()
         wb.save(out_file)
 
         return True
