@@ -45,17 +45,29 @@ OCRで読み取ったhtmlをブラウザで表示し、表計算ソフトに貼�
 ※ sample.xlsx をサンプルとして参考にしてください。
 
 
-| 日付 | 終了日(オプション) | 行事 | イベントID |
-| ---- | ------------------ | ---- | ---------- |
+| 開始日 | 終了日 | 行事 | 内容 | 作成日 | 更新日 | イベントID |
+| ------ | ------ | ---- | ---- | ------ | ------ | ---------- |
+|        |        |      |      |        |        |            |
 
-- 日付
+- 開始日
   イベントの開始日。時間を記入する必要はない。同じ日のイベントでも別の行に記載すること。1イベント1行です。
 - 終了日
   イベントの終了日。この日を含む予定として作成される。一日のみのイベントの場合は記入不要。
 - 行事
   イベントの名称
+- 内容
+  イベントの内容。補足事項など
+- 作成日
+  システムで管理する値。記入不要。カレンダーイベントの作成日
+- 更新日
+  システムで管理する値。記入不要。カレンダーイベントの更新日
 - イベントID
   システムで管理するID。記入不要。プログラムを実行して登録処理を行うとここにIDが記入される。この値は変更してはいけない。
+
+> コマンドでGoogleカレンダーをダウンロードすると同じ形式のファイルが作成されるので雛形として使用できる。
+> 新年度、イベント登録がない状態でダウンロードするとからの雛形ファイルが作成される。
+
+
 
 ### カレンダー登録
 
@@ -80,7 +92,9 @@ https://developers.google.com/calendar/api/quickstart/python?hl=ja
 カレンダーへのアクセスの準備と一覧の作成ができたら以下のコマンドで登録処理を行ってください。
 
 ```
-(.venv) $ python hinocal sync -f 一覧のファイル名
+(.venv) $ python hinocal.py upload -sy 2025
+
+※ -sy: school year. 対象とする年度を指定する
 ```
 
 初回実行時にはGoogleの認証処理が行われます。ブラウザを操作して適宜認証してください。
@@ -88,15 +102,29 @@ https://developers.google.com/calendar/api/quickstart/python?hl=ja
 
 ##### hinocal.pyの説明
 
+Googleカレンダーを正として、hinocalコマンドでデータをダウンロードし、ダウンロードしてできたExcelファイルを編集し、編集内容をアップロードしてカレンダーに反映する。
+
+1. ダウンロード
+  ```python hinocal.py download -sy 2025```
+
+2. ファイル編集
+   ```calendar_sy2025.xlsx```
+
+3. アップロード
+  ```python hinocal.py upload -sy 2025```
+
+
 ```
 
 (.venv) $ python hinocal.py -h
-usage: hinocal.py [-h] [-re] [-sd STARTDATE] [-f FILE] {list,sync,calendar}
+usage: hinocal.py [-h] [-re] [-sd STARTDATE] [-f FILE] [-cf CALENDAR_FILE] [-sy SCHOOL_YEAR]
+                  {list,sync,calendar,download,upload}
 
-Googleカレンダーにイベント(予定)を登録・更新する
+Googleカレンダーにイベント(予定)を登録・更新する。Googleカレンダーの情報を正と捉え、更新するためにダウンロードし、編集後にアップロードしてカレンダーを更新する。
 
 positional arguments:
-  {list,sync,calendar}  list: Get and print events from Google calender. sync: Sync local to Google. calendar: Get and print
+  {list,sync,calendar,download,upload}
+                        list: Get and print events from Google calender. sync: Sync local to Google. calendar: Get and print
                         calenders from Google.
 
 options:
@@ -105,6 +133,10 @@ options:
   -sd STARTDATE, --startdate STARTDATE
                         開始年月 yyyy-mm
   -f FILE, --file FILE  行事予定一覧excelファイル
+  -cf CALENDAR_FILE, --calendar_file CALENDAR_FILE
+                        カレンダーの内容を書き出す/読み込むexcelファイル名。指定しない場合は'calendar_syYYYY.xlsx'。既存のファイルは上書きされる。
+  -sy SCHOOL_YEAR, --school_year SCHOOL_YEAR
+                        年度 yyyy。downloadとuploadの際に使用する。
 
 
 ```
