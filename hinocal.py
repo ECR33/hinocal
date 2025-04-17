@@ -72,64 +72,83 @@ def update_event(service, event):
     """カレンダーにイベントを登録する"""
     result = None
     g_event = None
-    try:
-        # Googleから取得
-        g_event = (
-            service.events().get(calendarId=CAL_ID, eventId=f"{event['id']}").execute()
-        )
 
-        if g_event != None:
-            # 値準備
-            g_start = g_event["start"].get("dateTime", g_event["start"].get("date"))
-            g_end = g_event["end"].get("dateTime", g_event["end"].get("date"))
-            g_summary = g_event.get("summary")
-            g_description = remove_time_stamp(g_event.get("description"))
+    if event.get("summary") == "":
+        # 削除
+        try:
+            service.events().delete(
+                calendarId=CAL_ID, eventId=f"{event['id']}"
+            ).execute()
+            return event
+        except Exception as e:
+            print(f"イベント削除処理でエラーとなりました。{event['id']}")
+            ic(e)
+    else:
+        # 更新
+        try:
+            # Googleから取得
+            g_event = (
+                service.events()
+                .get(calendarId=CAL_ID, eventId=f"{event['id']}")
+                .execute()
+            )
 
-            start = event["start"].get("dateTime", event["start"].get("date"))
-            end = event["end"].get("dateTime", event["end"].get("date"))
-            summary = event.get("summary")
-            description = event.get("description")
+            if g_event != None:
+                # 値準備
+                g_start = g_event["start"].get("dateTime", g_event["start"].get("date"))
+                g_end = g_event["end"].get("dateTime", g_event["end"].get("date"))
+                g_summary = g_event.get("summary")
+                g_description = remove_time_stamp(g_event.get("description"))
 
-            # 変更確認
-            if (
-                g_start == start
-                and g_end == end
-                and g_summary == summary
-                and g_description == description
-                and g_event["status"] == "confirmed"
-            ):
-                # 変更なし
-                pass
-            else:
-                # 変更あり。
-                if g_event["status"] != "confirmed":
-                    # 削除済みなので更新しない
+                start = event["start"].get("dateTime", event["start"].get("date"))
+                end = event["end"].get("dateTime", event["end"].get("date"))
+                summary = event.get("summary")
+                description = event.get("description")
+
+                # 変更確認
+                if (
+                    g_start == start
+                    and g_end == end
+                    and g_summary == summary
+                    and g_description == description
+                    and g_event["status"] == "confirmed"
+                ):
+                    # 変更なし
                     pass
                 else:
-                    # 更新する。
-                    g_event["start"] = event["start"]
-                    g_event["end"] = event["end"]
-                    g_event["summary"] = event["summary"]
-                    g_event["status"] = "confirmed"
-                    g_event["description"] = append_time_stamp(description)
-                    result = (
-                        service.events()
-                        .update(calendarId=CAL_ID, eventId=g_event["id"], body=g_event)
-                        .execute()
-                    )
-                    # debug
-                    # ic(g_event, event)
-                    if result:
-                        print("Event created/updated: %s" % (result.get("htmlLink")))
+                    # 変更あり。
+                    if g_event["status"] != "confirmed":
+                        # 削除済みなので更新しない
+                        pass
                     else:
-                        print("Why result is None?")
+                        # 更新する。
+                        g_event["start"] = event["start"]
+                        g_event["end"] = event["end"]
+                        g_event["summary"] = event["summary"]
+                        g_event["status"] = "confirmed"
+                        g_event["description"] = append_time_stamp(description)
+                        result = (
+                            service.events()
+                            .update(
+                                calendarId=CAL_ID, eventId=g_event["id"], body=g_event
+                            )
+                            .execute()
+                        )
+                        # debug
+                        # ic(g_event, event)
+                        if result:
+                            print(
+                                "Event created/updated: %s" % (result.get("htmlLink"))
+                            )
+                        else:
+                            print("Why result is None?")
 
-    except HttpError as e:
-        # 取得できなかったので追加する
-        event["description"] = append_time_stamp(event.get("description"))
-        result = service.events().insert(calendarId=CAL_ID, body=event).execute()
+        except HttpError as e:
+            # 取得できなかったので追加する
+            event["description"] = append_time_stamp(event.get("description"))
+            result = service.events().insert(calendarId=CAL_ID, body=event).execute()
 
-    return result
+        return result
 
 
 def get_events(service, start_date):
@@ -350,10 +369,17 @@ def download_events(service, school_year, out_file):
 
         ws.freeze_panes = "B2"
         # ws.protection.password = "hinogaku"
+        ws.protection.enable()
+        ws.protection.objects = False
+        ws.protection.scenarios = False
         ws.protection.insertRows = False
         ws.protection.deleteRows = False
         ws.protection.sort = False
-        ws.protection.enable()
+        ws.protection.formatCells = False
+        ws.protection.formatRows = False
+        ws.protection.formatCells = False
+        ws.protection.formatColumns = False
+        ws.protection.formatRows = False
         wb.save(out_file)
         ic(out_file)
 
@@ -394,7 +420,7 @@ def upload_events(service, school_year, in_file):
             g_event = create_event_from_row(row)
             if g_event:
                 event = update_event(service, g_event)
-                if event:
+                if event and event.get("summary") != "":
                     print(
                         f"{counter}/{max_row}: Updated. {event["start"].get("dateTime",event["start"].get("date"))} - {event["end"].get("dateTime",event["end"].get("date"))}: {event["summary"]} {event.get("description")}"
                     )
@@ -406,13 +432,15 @@ def upload_events(service, school_year, in_file):
                     ws.cell(counter, 5).number_format = "yyyy/mm/dd hh:mm"
                     ws.cell(counter, 6, updated.replace(tzinfo=None))
                     ws.cell(counter, 6).number_format = "yyyy/mm/dd hh:mm"
-
+                elif event and event.get("summary") == "":
+                    print(f"{counter}/{max_row}: Deleted. {g_event["id"]}")
                 else:
                     print(
                         f"{counter}/{max_row}: Skipped. {g_event["start"].get("dateTime",g_event["start"].get("date"))} - {g_event["end"].get("dateTime",g_event["end"].get("date"))}: {g_event.get("summary")}"
                     )
             else:
                 # ignore None
+                # print(f"{counter}/{max_row}: ignore")
                 pass
     wb.save(in_file)
 
@@ -447,9 +475,20 @@ def create_event_from_row(row):
     """カレンダーイベントを作成する"""
     summary = row[2].value
     if summary == None or summary == "":
-        return None
+        # 削除レコード確認
+        if (
+            (row[0].value == None or row[0].value == "" or row[0].value == 0)
+            and row[6].value != None
+            and row[6].value != ""
+        ):
+            # 削除
+            event = {"id": f"{row[6].value}", "summary": ""}
+            return event
+        else:
+            # 不正なレコード。読み飛ばし対象
+            return None
 
-    description = row[3].value
+    description = row[3].value or ""
 
     if len(row) > 6:
         event_id = row[6].value
@@ -620,7 +659,9 @@ if __name__ == "__main__":
         "--calendar_file",
         help="カレンダーの内容を書き出す/読み込むexcelファイル名。指定しない場合は'calendar_syYYYY.xlsx'。既存のファイルは上書きされる。",
     )
-    parser.add_argument("-sy", "--school_year", help="年度 yyyy。downloadとuploadの際に使用する。")
+    parser.add_argument(
+        "-sy", "--school_year", help="年度 yyyy。downloadとuploadの際に使用する。"
+    )
     args = parser.parse_args()
     if args.relogin:
         if os.path.exists("./token.json"):
