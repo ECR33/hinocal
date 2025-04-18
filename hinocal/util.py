@@ -1,39 +1,47 @@
+import os
 import datetime
 import zoneinfo
-import os.path
-import argparse
 from icecream import ic
+from dotenv import load_dotenv
 import openpyxl
 from openpyxl.styles import Alignment, Protection
 from openpyxl.comments import Comment
 import uuid
 import re
 
-from google.auth.transport.requests import Request
+
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+
 # If modifying these scopes, delete the file token.json.
 # SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-CAL_ID = "bg48q2kl7vsojfsg5tssgui52s@group.calendar.google.com"  # 日野学園 年間行事カレンダー
+
+load_dotenv()
+CAL_ID = os.getenv("CAL_ID")
+if CAL_ID == None:
+    CAL_ID = "ja.japanese#holiday@group.v.calendar.google.com"  # 日本の祝日カレンダー
+
 
 
 def sign_in():
     """Googleにサインイン"""
-    creds = None
+    ic(CAL_ID)
+    credentials = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
     # time.
     if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+        credentials = Credentials.from_authorized_user_file("token.json", SCOPES)
     # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
             try:
-                creds.refresh(Request())
+                credentials.refresh(Request())
             except Exception as e:
                 print(
                     "ERROR: おそらくtokenの有効期限が切れています。-reオプションを指定して再度実行してください。"
@@ -42,11 +50,18 @@ def sign_in():
                 exit(1)
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=0)
+            credentials = flow.run_local_server(port=0)
         # Save the credentials for the next run
         with open("token.json", "w") as token:
-            token.write(creds.to_json())
-    return creds
+            token.write(credentials.to_json())
+    return credentials
+
+
+def get_service():
+    """Googleサービスを取得する"""
+    credentials = sign_in()
+    service = build("calendar", "v3", credentials=credentials)
+    return service
 
 
 def iso2jst(date_str):
@@ -57,8 +72,11 @@ def iso2jst(date_str):
 
 def remove_time_stamp(description):
     """descriptionに記載されている(このシステムで追加した)タイムスタンプを除去する"""
-    description = re.sub("/////.*時点 /////$", "", description)
-    return description.strip()
+    if description:
+        description = re.sub("/////.*時点 /////$", "", description)
+        return description.strip()
+    else:
+        return ""
 
 
 def append_time_stamp(description):
@@ -555,115 +573,3 @@ def create_event_from_row(row):
         event["end"]["timeZone"] = "Asia/Tokyo"
 
     return event
-
-
-def main(command=None, in_file=None, args=None):
-
-    creds = sign_in()
-    service = build("calendar", "v3", credentials=creds)
-
-    if command == "list":
-        events = get_events(service, args.startdate)
-
-        if not events:
-            print("No upcoming events found.")
-            return
-
-        # Prints the start and name of the next 10 events
-        for event in events:
-            start = event["start"].get("dateTime", event["start"].get("date"))
-            # print(start, event["id"], event["summary"], event["description"])
-            ic(event)
-            # created_str = event.get("created")
-            # created = iso2jst(created_str)
-            # updated_str = event.get("updated")
-            # updated = iso2jst(updated_str)
-            # ic(event.get("summary"))
-            # ic(created_str, created.strftime("%Y-%m-%d %H:%M:%S"))
-            # ic(updated_str, updated.strftime("%Y-%m-%d %H:%M:%S"))
-
-    if command == "calendar":
-        list_calendar(service)
-
-    if command == "download":
-        download_events(service, args.school_year, args.calendar_file)
-
-    if command == "upload":
-        upload_events(service, args.school_year, args.calendar_file)
-
-    if command == "sync":
-        ic(in_file)
-        if in_file == None:
-            print("Please specify the file name for input.")
-            return False
-        wb = openpyxl.load_workbook(in_file)
-        ws = wb["Sheet1"]
-        max_row = ws.max_row
-        counter = 0
-        for row in ws:
-            counter += 1
-            # if counter > 10:  # debug
-            #     break
-            if row[0].value == "日付":
-                # skip
-                print(f"{counter}/{max_row}: skip title row")
-                pass
-            else:
-                g_event = create_event_from_row(row)
-                if g_event:
-                    event = update_event(service, g_event)
-                    if event:
-                        print(
-                            f"{counter}/{max_row}: Updated. {event["start"]["dateTime"]} - {event["end"]["dateTime"]}: {event["summary"]} {event["description"]}"
-                        )
-                        # write back to excel sheet
-                        ws.cell(counter, 4, g_event["id"])
-                    else:
-                        print(
-                            f"{counter}/{max_row}: Skipped. {g_event["start"]["dateTime"]} - {g_event["end"]["dateTime"]}: {g_event["summary"]}"
-                        )
-                else:
-                    # ignore None
-                    pass
-        wb.save(in_file)
-
-        try:
-            pass
-
-            # event = update_event(service, event)
-            # print ('Event created: %s' % (event.get('htmlLink')))
-
-        except HttpError as error:
-            print(f"An error occurred: {error}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Googleカレンダーにイベント(予定)を登録・更新する。Googleカレンダーの情報を正と捉え、更新するためにダウンロードし、編集後にアップロードしてカレンダーを更新する。"
-    )
-    parser.add_argument(
-        "command",
-        choices=["list", "sync", "calendar", "download", "upload"],
-        help="list: Get and print events from Google calender. sync: Sync local to Google. calendar: Get and print calenders from Google.",
-    )
-    parser.add_argument(
-        "-re",
-        "--relogin",
-        action="store_true",
-        help="サインイン情報をクリアしてから実行する",
-    )
-    parser.add_argument("-sd", "--startdate", help="開始年月 yyyy-mm")
-    parser.add_argument("-f", "--file", help="行事予定一覧excelファイル")
-    parser.add_argument(
-        "-cf",
-        "--calendar_file",
-        help="カレンダーの内容を書き出す/読み込むexcelファイル名。指定しない場合は'calendar_syYYYY.xlsx'。既存のファイルは上書きされる。",
-    )
-    parser.add_argument(
-        "-sy", "--school_year", help="年度 yyyy。downloadとuploadの際に使用する。"
-    )
-    args = parser.parse_args()
-    if args.relogin:
-        if os.path.exists("./token.json"):
-            os.remove("./token.json")
-    main(args.command, args.file, args)

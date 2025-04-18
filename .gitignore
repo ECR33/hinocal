@@ -9,3 +9,6 @@ token*.json
 *.xlsx*
 !sample.xlsx
 *.pdf
+.env
+hinocal_ecr33.egg-info/
+dist/
